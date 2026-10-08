@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Disney Air Control</title>
+<style>
+html,body{margin:0;width:100%;height:100%;background:#05070d;color:#fff;font-family:Arial,sans-serif;overflow:hidden}
+#disney{position:absolute;inset:0;width:100%;height:100%;border:0;background:#05070d}
+#cam{position:fixed;right:12px;bottom:12px;width:180px;height:135px;object-fit:cover;border:2px solid white;border-radius:14px;transform:scaleX(-1);z-index:5}
+#dot{position:fixed;width:25px;height:25px;border-radius:50%;background:#00e5ff;box-shadow:0 0 20px #00e5ff;transform:translate(-50%,-50%);z-index:8;display:none;pointer-events:none}
+#panel{position:fixed;z-index:10;left:50%;top:16px;transform:translateX(-50%);background:#000c;padding:14px 18px;border-radius:18px;text-align:center;max-width:90%}
+#panel h1{font-size:20px;margin:0 0 5px}.small{font-size:13px;color:#ccd}
+button{margin-top:9px;padding:10px 15px;border:0;border-radius:12px;font-weight:bold}
+#help{position:fixed;left:12px;bottom:12px;z-index:6;background:#000b;padding:12px;border-radius:14px;font-size:13px;line-height:1.45}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<iframe id="disney" src="https://www.disneyplus.com/" title="Disney+" allow="autoplay;fullscreen;picture-in-picture"></iframe>
+<video id="cam" autoplay playsinline muted></video>
+<div id="dot"></div>
+
+<div id="panel">
+<h1>🎬 Disney Air Control</h1>
+<div id="status" class="small">Listo para controlar con gestos.</div>
+<button id="start">✋ Activar cámara y gestos</button>
+</div>
+
+<div id="help">
+✊ Puño = play / pausa<br>
+👉 Desliza a la derecha = +10 s<br>
+👈 Desliza a la izquierda = −10 s<br>
+👆 Desliza hacia arriba = ocultar controles
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script>
+const frame=document.getElementById('disney');
+const video=document.getElementById('cam');
+const dot=document.getElementById('dot');
+const panel=document.getElementById('panel');
+const help=document.getElementById('help');
+const status=document.getElementById('status');
+
+let startX=null,startY=null,startTime=0;
+let lastGesture=0;
+let fistWasDown=false;
+
+function send(action,extra={}){
+  try{
+    frame.contentWindow.postMessage(
+      {type:'air-control',action,...extra},
+      'https://www.disneyplus.com'
+    );
+  }catch(e){}
+}
+
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+
+function isFist(p){
+  const tips=[8,12,16,20], mids=[6,10,14,18];
+  let folded=0;
+  for(let n=0;n<4;n++){
+    if(dist(p[tips[n]],p[0]) < dist(p[mids[n]],p[0])) folded++;
+  }
+  return folded>=3;
+}
+
+const hands=new Hands({
+  locateFile:f=>'https://cdn.jsdelivr.net/npm/@mediapipe/hands/'+f
+});
+
+hands.setOptions({
+  maxNumHands:1,
+  modelComplexity:1,
+  minDetectionConfidence:.65,
+  minTrackingConfidence:.65
+});
+
+hands.onResults(r=>{
+  if(!r.multiHandLandmarks?.length){
+    dot.style.display='none';
+    startX=null;
+    return;
+  }
+
+  const p=r.multiHandLandmarks[0];
+  const index=p[8];
+  const now=performance.now();
+
+  dot.style.display='block';
+  dot.style.left=(1-index.x)*100+'vw';
+  dot.style.top=index.y*100+'vh';
+
+  const fistNow=isFist(p);
+
+  // PUÑO: una sola orden al cerrar el puño.
+  if(fistNow && !fistWasDown && now-lastGesture>1000){
+    send('playPause');
+    status.textContent='✊ Play / pausa';
+    lastGesture=now;
+  }
+  fistWasDown=fistNow;
+
+  // SWIPE: empieza con el dedo índice extendido y termina al desplazarlo.
+  if(!fistNow){
+    if(startX===null){
+      startX=index.x;
+      startY=index.y;
+      startTime=now;
+    }else{
+      const dx=index.x-startX;
+      const dy=index.y-startY;
+      const elapsed=now-startTime;
+
+      // Movimiento rápido y claramente horizontal.
+      if(now-lastGesture>900 && elapsed<900 && Math.abs(dx)>.25 && Math.abs(dx)>Math.abs(dy)*1.35){
+        if(dx>0){
+          send('seek',{seconds:10});
+          status.textContent='👉 +10 segundos';
+        }else{
+          send('seek',{seconds:-10});
+          status.textContent='👈 −10 segundos';
+        }
+        lastGesture=now;
+        startX=null;
+      }
+
+      // Movimiento hacia arriba para ocultar controles.
+      if(now-lastGesture>900 && dy<-.28 && Math.abs(dy)>Math.abs(dx)*1.2){
+        panel.classList.add('hidden');
+        help.classList.add('hidden');
+        status.textContent='👆 Controles ocultos';
+        lastGesture=now;
+        startX=null;
+      }
+    }
+  }else{
+    startX=null;
+  }
+});
+
+document.getElementById('start').onclick=async()=>{
+  try{
+    video.srcObject=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'user'},
+      audio:false
+    });
+
+    const cam=new Camera(video,{
+      onFrame:async()=>{await hands.send({image:video});},
+      width:640,
+      height:480
+    });
+
+    cam.start();
+    status.textContent='Cámara activa ✓ Haz un deslizamiento rápido con el índice.';
+  }catch(e){
+    status.textContent='No se pudo activar la cámara. Permite el acceso en Safari.';
+  }
+};
+
+frame.onload=()=>{
+  status.textContent='Disney+ cargó. Si aparece bloqueado, Disney+ no permite incrustarse aquí.';
+};
+</script>
+</body>
+</html>
